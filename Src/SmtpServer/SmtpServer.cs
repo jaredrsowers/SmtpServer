@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,24 +11,24 @@ namespace SmtpServer
     public class SmtpServer
     {
         /// <summary>
-        /// Raised when a session has been created.
+        ///     Raised when a session has been created.
         /// </summary>
         public event EventHandler<SessionEventArgs> SessionCreated;
 
         /// <summary>
-        /// Raised when a session has completed.
+        ///     Raised when a session has completed.
         /// </summary>
         public event EventHandler<SessionEventArgs> SessionCompleted;
 
         /// <summary>
-        /// Raised when a session has faulted.
+        ///     Raised when a session has faulted.
         /// </summary>
         public event EventHandler<SessionFaultedEventArgs> SessionFaulted;
 
         readonly ISmtpServerOptions _options;
 
         /// <summary>
-        /// Constructor.
+        ///     Constructor.
         /// </summary>
         /// <param name="options">The SMTP server options.</param>
         public SmtpServer(ISmtpServerOptions options)
@@ -35,17 +36,14 @@ namespace SmtpServer
             _options = options;
         }
 
-        /// <summary>
-        /// Raises the SessionCreated Event.
-        /// </summary>
-        /// <param name="args">The event data.</param>
+
         protected virtual void OnSessionCreated(SessionEventArgs args)
         {
             SessionCreated?.Invoke(this, args);
         }
 
         /// <summary>
-        /// Raises the SessionCompleted Event.
+        ///     Raises the SessionCompleted Event.
         /// </summary>
         /// <param name="args">The event data.</param>
         protected virtual void OnSessionCompleted(SessionEventArgs args)
@@ -54,7 +52,7 @@ namespace SmtpServer
         }
 
         /// <summary>
-        /// Raises the SessionCompleted Event.
+        ///     Raises the SessionCompleted Event.
         /// </summary>
         /// <param name="args">The event data.</param>
         protected virtual void OnSessionFaulted(SessionFaultedEventArgs args)
@@ -63,83 +61,101 @@ namespace SmtpServer
         }
 
         /// <summary>
-        /// Starts the SMTP server.
+        ///     Starts the SMTP server.
         /// </summary>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>A task which performs the operation.</returns>
         public async Task StartAsync(CancellationToken cancellationToken)
         {
-            await Task.WhenAll(_options.Endpoints.Select(e => ListenAsync(e, cancellationToken))).ConfigureAwait(false);
+            await Task.WhenAll(_options.Endpoints.Select(e => ListenAsync(e, cancellationToken)))
+                      .ConfigureAwait(false);
         }
 
         /// <summary>
-        /// Listen for SMTP traffic on the given endpoint.
+        ///     Listen for SMTP traffic on the given endpoint.
         /// </summary>
         /// <param name="endpointDefinition">The definition of the endpoint to listen on.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>A task which performs the operation.</returns>
-        async Task ListenAsync(IEndpointDefinition endpointDefinition, CancellationToken cancellationToken)
+        Task ListenAsync(IEndpointDefinition endpointDefinition, CancellationToken cancellationToken)
         {
-            // keep track of the running tasks for disposal
-            var sessions = new ConcurrentDictionary<SmtpSession, SmtpSession>();
-
-            using (var endpointListener = _options.EndpointListenerFactory.CreateListener(endpointDefinition))
+            return Task.Run(async () =>
             {
-                while (cancellationToken.IsCancellationRequested == false)
+                // keep track of the running tasks for disposal
+                var sessions = new ConcurrentDictionary<Task, Task>();
+
+                using (var endpointListener = _options.EndpointListenerFactory.CreateListener(endpointDefinition))
                 {
-                    var sessionContext = new SmtpSessionContext(_options, endpointDefinition);
-
-                    try
+                    while (cancellationToken.IsCancellationRequested == false)
                     {
-                        // wait for a client connection
-                        var stream = await endpointListener.GetStreamAsync(sessionContext, cancellationToken).ConfigureAwait(false);
-                        cancellationToken.ThrowIfCancellationRequested();
+                        var sessionContext = new SmtpSessionContext(_options, endpointDefinition);
 
-                        sessionContext.NetworkClient = new NetworkClient(stream, _options.NetworkBufferSize, _options.NetworkBufferReadTimeout);
+                        Stream stream = null;
 
-                        if (endpointDefinition.IsSecure && _options.ServerCertificate != null)
+                        try
                         {
-                            await sessionContext.NetworkClient.UpgradeAsync(_options.ServerCertificate, _options.SupportedSslProtocols, cancellationToken).ConfigureAwait(false);
+                            // wait for a client connection
+                            stream = await endpointListener.GetStreamAsync(sessionContext, cancellationToken)
+                                                           .ConfigureAwait(false);
+
                             cancellationToken.ThrowIfCancellationRequested();
+
+
+                            Task task = null;
+
+                            task = Task.Run(async () =>
+                                            {
+                                                sessionContext.NetworkClient = new NetworkClient(stream, _options.NetworkBufferSize, _options.NetworkBufferReadTimeout);
+
+
+                                                if (endpointDefinition.IsSecure && _options.ServerCertificate != null)
+                                                {
+                                                    await sessionContext.NetworkClient.UpgradeAsync(_options.ServerCertificate, _options.SupportedSslProtocols, cancellationToken)
+                                                                        .ConfigureAwait(false);
+
+                                                    cancellationToken.ThrowIfCancellationRequested();
+                                                }
+
+                                                // create a new session to handle the connection
+                                                var session = new SmtpSession(sessionContext);
+
+                                                OnSessionCreated(new SessionEventArgs(sessionContext));
+
+                                                await session.Run(cancellationToken);
+                                            },
+                                            cancellationToken)
+                                       .ContinueWith(t =>
+                                                     {
+                                                         stream.Dispose();
+
+                                                         if (t.Exception != null)
+                                                         {
+                                                             OnSessionFaulted(new SessionFaultedEventArgs(sessionContext, t.Exception));
+                                                         }
+
+                                                         OnSessionCompleted(new SessionEventArgs(sessionContext));
+
+                                                         sessions.TryRemove(task, out _);
+                                                     },
+                                                     cancellationToken);
+
+                            sessions.TryAdd(task, task);
                         }
+                        catch (OperationCanceledException)
+                        { }
+                        catch (Exception ex)
+                        {
+                            OnSessionFaulted(new SessionFaultedEventArgs(sessionContext, ex));
 
-                        // create a new session to handle the connection
-                        var session = new SmtpSession(sessionContext);
-                        sessions.TryAdd(session, session);
-
-                        OnSessionCreated(new SessionEventArgs(sessionContext));
-
-                        session.Run(cancellationToken);
-
-                        #pragma warning disable 4014
-                        session.Task
-                            .ContinueWith(t =>
-                            {
-                                if (sessions.TryRemove(session, out var s))
-                                {
-                                    sessionContext.NetworkClient.Dispose();
-                                }
-
-                                if (t.Exception != null)
-                                {
-                                    OnSessionFaulted(new SessionFaultedEventArgs(sessionContext, t.Exception));
-                                }
-
-                                OnSessionCompleted(new SessionEventArgs(sessionContext));
-                            },
-                            cancellationToken);
-                        #pragma warning restore 4014
+                            stream?.Dispose();
+                        }
                     }
-                    catch (OperationCanceledException) { }
-                    catch (Exception ex)
-                    {
-                        OnSessionFaulted(new SessionFaultedEventArgs(sessionContext, ex));
-                    }
+
+                    // the server has been cancelled, wait for the tasks to complete
+                    await Task.WhenAll(sessions.Keys)
+                              .ConfigureAwait(false);
                 }
-
-                // the server has been cancelled, wait for the tasks to complete
-                await Task.WhenAll(sessions.Keys.Select(s => s.Task)).ConfigureAwait(false);
-            }
+            });
         }
     }
 }

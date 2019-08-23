@@ -10,7 +10,7 @@ using SmtpServer.Protocol;
 
 namespace SmtpServer.IO
 {
-    public interface INetworkClient : IDisposable
+    public interface INetworkClient  
     {
         /// <summary>
         /// Returns a series a buffer segments until the continuation predicate indicates that the method should complete.

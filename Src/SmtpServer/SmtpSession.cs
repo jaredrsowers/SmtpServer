@@ -1,10 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
-using SmtpServer.Protocol;
-using System.Reflection;
 using SmtpServer.IO;
+using SmtpServer.Protocol;
 using SmtpServer.Text;
 
 namespace SmtpServer
@@ -13,10 +13,9 @@ namespace SmtpServer
     {
         readonly SmtpStateMachine _stateMachine;
         readonly SmtpSessionContext _context;
-        TaskCompletionSource<bool> _taskCompletionSource;
 
         /// <summary>
-        /// Constructor.
+        ///     Constructor.
         /// </summary>
         /// <param name="context">The session context.</param>
         internal SmtpSession(SmtpSessionContext context)
@@ -26,52 +25,26 @@ namespace SmtpServer
         }
 
         /// <summary>
-        /// Executes the session.
+        ///     Executes the session.
         /// </summary>
         /// <param name="cancellationToken">The cancellation token.</param>
-        public void Run(CancellationToken cancellationToken)
-        {
-            _taskCompletionSource = new TaskCompletionSource<bool>();
-
-            RunAsync(cancellationToken)
-                .ContinueWith(t =>
-                {
-                    try
-                    {
-                        if (t.Exception != null)
-                        {
-                            _taskCompletionSource.TrySetException(t.Exception.InnerExceptions);
-                        }
-
-                        _taskCompletionSource.SetResult(t.IsCompleted);
-                    }
-                    catch
-                    {
-                        _taskCompletionSource.SetResult(false);
-                    }
-                }, 
-                cancellationToken);
-        }
-
-        /// <summary>
-        /// Handles the SMTP session.
-        /// </summary>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <returns>A task which performs the operation.</returns>
-        async Task RunAsync(CancellationToken cancellationToken)
+        public async Task Run(CancellationToken cancellationToken)
         {
             if (cancellationToken.IsCancellationRequested)
             {
                 return;
             }
 
-            await OutputGreetingAsync(cancellationToken).ConfigureAwait(false);
+            await OutputGreetingAsync(cancellationToken)
+                .ConfigureAwait(false);
 
-            await ExecuteAsync(_context, cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(_context, cancellationToken)
+                .ConfigureAwait(false);
         }
 
+
         /// <summary>
-        /// Execute the command handler against the specified session context.
+        ///     Execute the command handler against the specified session context.
         /// </summary>
         /// <param name="context">The session context to execute the command handler against.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
@@ -82,7 +55,8 @@ namespace SmtpServer
 
             while (retries-- > 0 && context.IsQuitRequested == false && cancellationToken.IsCancellationRequested == false)
             {
-                var text = await ReadCommandInputAsync(context, cancellationToken).ConfigureAwait(false);
+                var text = await ReadCommandInputAsync(context, cancellationToken)
+                               .ConfigureAwait(false);
 
                 if (text == null)
                 {
@@ -93,7 +67,8 @@ namespace SmtpServer
                 {
                     try
                     {
-                        if (await ExecuteAsync(command, context, cancellationToken).ConfigureAwait(false))
+                        if (await ExecuteAsync(command, context, cancellationToken)
+                                .ConfigureAwait(false))
                         {
                             _stateMachine.Transition(context);
                         }
@@ -110,17 +85,20 @@ namespace SmtpServer
                     }
                     catch (OperationCanceledException)
                     {
-                        await context.NetworkClient.ReplyAsync(new SmtpResponse(SmtpReplyCode.ServiceClosingTransmissionChannel, "The session has be cancelled."), cancellationToken).ConfigureAwait(false);
+                        await context.NetworkClient.ReplyAsync(new SmtpResponse(SmtpReplyCode.ServiceClosingTransmissionChannel, "The session has be cancelled."), cancellationToken)
+                                     .ConfigureAwait(false);
+
                         return;
                     }
                 }
 
-                await context.NetworkClient.ReplyAsync(CreateErrorResponse(response, retries), cancellationToken).ConfigureAwait(false);
+                await context.NetworkClient.ReplyAsync(CreateErrorResponse(response, retries), cancellationToken)
+                             .ConfigureAwait(false);
             }
         }
 
         /// <summary>
-        /// Read the command input.
+        ///     Read the command input.
         /// </summary>
         /// <param name="context">The session context to execute the command handler against.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
@@ -130,20 +108,25 @@ namespace SmtpServer
             var timeout = new CancellationTokenSource(_context.ServerOptions.CommandWaitTimeout);
 
             var cancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, cancellationToken);
-           
+
             try
             {
-                return await context.NetworkClient.ReadLineAsync(cancellationTokenSource.Token).ConfigureAwait(false);
+                return await context.NetworkClient.ReadLineAsync(cancellationTokenSource.Token)
+                                    .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
                 if (timeout.IsCancellationRequested)
                 {
-                    await context.NetworkClient.ReplyAsync(new SmtpResponse(SmtpReplyCode.ServiceClosingTransmissionChannel, "Timeout whilst waiting for input."), cancellationToken).ConfigureAwait(false);
+                    await context.NetworkClient.ReplyAsync(new SmtpResponse(SmtpReplyCode.ServiceClosingTransmissionChannel, "Timeout whilst waiting for input."), cancellationToken)
+                                 .ConfigureAwait(false);
+
                     return null;
                 }
 
-                await context.NetworkClient.ReplyAsync(new SmtpResponse(SmtpReplyCode.ServiceClosingTransmissionChannel, "The session has be cancelled."), CancellationToken.None).ConfigureAwait(false);
+                await context.NetworkClient.ReplyAsync(new SmtpResponse(SmtpReplyCode.ServiceClosingTransmissionChannel, "The session has be cancelled."), CancellationToken.None)
+                             .ConfigureAwait(false);
+
                 return null;
             }
             finally
@@ -154,18 +137,15 @@ namespace SmtpServer
         }
 
         /// <summary>
-        /// Create an error response.
+        ///     Create an error response.
         /// </summary>
         /// <param name="response">The original response to wrap with the error message information.</param>
         /// <param name="retries">The number of retries remaining before the session is terminated.</param>
         /// <returns>The response that wraps the original response with the additional error information.</returns>
-        static SmtpResponse CreateErrorResponse(SmtpResponse response, int retries)
-        {
-            return new SmtpResponse(response.ReplyCode, $"{response.Message}, {retries} retry(ies) remaining.");
-        }
+        static SmtpResponse CreateErrorResponse(SmtpResponse response, int retries) => new SmtpResponse(response.ReplyCode, $"{response.Message}, {retries} retry(ies) remaining.");
 
         /// <summary>
-        /// Advances the enumerator to the next command in the stream.
+        ///     Advances the enumerator to the next command in the stream.
         /// </summary>
         /// <param name="context">The session context to use when making session based transitions.</param>
         /// <param name="segments">The list of array segments to read the command from.</param>
@@ -180,7 +160,7 @@ namespace SmtpServer
         }
 
         /// <summary>
-        /// Execute the command.
+        ///     Execute the command.
         /// </summary>
         /// <param name="command">The command to execute.</param>
         /// <param name="context">The execution context to operate on.</param>
@@ -194,21 +174,21 @@ namespace SmtpServer
         }
 
         /// <summary>
-        /// Output the greeting.
+        ///     Output the greeting.
         /// </summary>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>A task which performs the operation.</returns>
         async Task OutputGreetingAsync(CancellationToken cancellationToken)
         {
-            var version = typeof(SmtpSession).GetTypeInfo().Assembly.GetName().Version;
+            var version = typeof(SmtpSession).GetTypeInfo()
+                                             .Assembly.GetName()
+                                             .Version;
 
-            await _context.NetworkClient.WriteLineAsync($"220 {_context.ServerOptions.ServerName} v{version} ESMTP ready", cancellationToken).ConfigureAwait(false);
-            await _context.NetworkClient.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await _context.NetworkClient.WriteLineAsync($"220 {_context.ServerOptions.ServerName} v{version} ESMTP ready", cancellationToken)
+                          .ConfigureAwait(false);
+
+            await _context.NetworkClient.FlushAsync(cancellationToken)
+                          .ConfigureAwait(false);
         }
-        
-        /// <summary>
-        /// Returns the completion task.
-        /// </summary>
-        internal Task<bool> Task => _taskCompletionSource.Task;
     }
 }
